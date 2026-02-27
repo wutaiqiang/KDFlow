@@ -24,7 +24,9 @@
 
 ## 📐 Architecture Overview
 
-<img src="figures/architecture.png" alt="KDFlow Architecture" width="80%">
+<p align="center">
+  <img src="figures/architecture.png" alt="KDFlow Architecture" width="80%">
+</p>
 
 ### Training Modes
 

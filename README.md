@@ -305,3 +305,9 @@ The `TeacherActorGroup` uses a **greedy token-based load balancing** strategy to
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## ⭐ Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=songmzhang/KDFlow&type=Date)](https://star-history.com/#songmzhang/KDFlow&Date)

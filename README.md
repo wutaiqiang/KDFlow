@@ -1,21 +1,25 @@
 
 # KDFlow
 
-**KDFlow** is a user-friendly and efficient knowledge distillation framework for large language models (LLMs), built on top of **Ray**, **DeepSpeed / FSDP2**, and **SGLang**. It supports both **off-policy** and **on-policy** knowledge distillation, enabling efficient transfer of knowledge from a large teacher model to a smaller student model.
+**KDFlow** is a user-friendly and efficient knowledge distillation framework for large language models (LLMs), built on top of **Ray**, **FSDP2**, and **SGLang**. It supports both **off-policy** and **on-policy** knowledge distillation, enabling efficient transfer of knowledge from a large teacher model to a smaller student model.
+
+<p align="left">
+  📄 <a href="https://arxiv.org/pdf/2603.01875">Paper (arXiv)</a>
+</p>
 
 ---
 
 ## ✨ Key Features
 
+- **Decoupled Infrastructure** - Using SGLang & FSDP2 for teacher inference and student training respectively.
 - **Off-Policy Knowledge Distillation** — Distill from pre-collected teacher hidden states on static datasets.
 - **On-Policy Knowledge Distillation** — Student-generated rollout responses are used for teacher forward and distillation training in a closed loop.
 - **Cross-Tokenizer Distillation** — Native support for distilling between models with different tokenizers (e.g., Llama → Qwen).
-- **SFT Training** — Supervised fine-tuning baseline with the same infrastructure.
-- **GPU Co-location** — Teacher and student models **share the same GPUs** via sleep/wakeup mechanism, maximizing GPU utilization.
-- **SGLang-Powered Teacher** — Teacher inference is powered by SGLang Engine with shared-memory hidden states extraction, enabling high-throughput prefilling.
+- **SFT Training (Black-box KD)** — Supervised fine-tuning on collected dataset.
+- **Colocate Mode** — Teacher and student models **share the same GPUs** via sleep/wakeup mechanism, maximizing GPU utilization.
+- **Teacher on SGLang** — Teacher inference is powered by SGLang Engine, enabling high-throughput prefilling and flexible parallel strategies.
 - **Pluggable KD Algorithms** — Built-in support for Vanilla KD and DSKD (Dual-Space Knowledge Distillation), with easy registration of custom algorithms.
-- **Multiple Loss Functions** — KL divergence, Reverse KL divergence, JS divergence, with optional Triton kernel acceleration.
-- **Flexible Training Backend** — Supports DeepSpeed (ZeRO Stage 1/2/3) and PyTorch FSDP2.
+- **Multiple Loss Functions** — Torch compiled KL divergence, Reverse KL divergence, JS divergence, etc.
 - **LoRA Support** — Optional LoRA fine-tuning for the student model.
 - **Wand&b Integration** — Built-in wand&b logging for experiment tracking.
 - **High Training Efficiency** — Achieves **1.4x to 6x** faster distillation compared to mainstream knowledge distillation frameworks.
@@ -33,7 +37,7 @@
 #### Off-Policy KD
 
 ```
-Data → Teacher Forward (SGLang) → Hidden States → Student Train (DeepSpeed/FSDP2)
+Data → Teacher Forward (SGLang) → Hidden States → Student Train (FSDP2)
        [sleep/wakeup GPU sharing]
 ```
 
@@ -63,7 +67,6 @@ Prompts → Rollout (SGLang) → Responses → Teacher Forward → Hidden States
 - Python 3.10+
 - PyTorch 2.4+
 - [Ray](https://docs.ray.io/) 2.x
-- [DeepSpeed](https://github.com/microsoft/DeepSpeed) or PyTorch FSDP2
 - [SGLang](https://github.com/sgl-project/sglang)
 - [Transformers](https://github.com/huggingface/transformers)
 - [PEFT](https://github.com/huggingface/peft) (for LoRA)
@@ -88,7 +91,7 @@ python -m kdflow.cli.train_kd_off_policy \
     --loss_fn kl \
     --teacher_tp_size 8 \
     --teacher_dp_size 1 \
-    --backend deepspeed \
+    --backend fsdp2 \
     --save_path ./output/off_policy_kd \
     --bf16
 ```
@@ -116,7 +119,7 @@ python -m kdflow.cli.train_kd_on_policy \
     --n_samples_per_prompt 1 \
     --generate_max_len 2048 \
     --temperature 1.0 \
-    --backend deepspeed \
+    --backend fsdp2 \
     --save_path ./output/on_policy_kd \
     --bf16
 ```
@@ -132,7 +135,7 @@ torchrun --nproc_per_node 8 -m kdflow.cli.train_sft \
     --micro_train_batch_size 2 \
     --learning_rate 1e-5 \
     --num_epochs 1 \
-    --backend deepspeed \
+    --backend fsdp2 \
     --save_path ./output/sft \
     --bf16
 ```
@@ -167,7 +170,7 @@ torchrun --nproc_per_node 8 -m kdflow.cli.train_sft \
 | `--lr_scheduler` | `cosine_with_min_lr` | LR scheduler type |
 | `--lr_warmup_ratio` | `0.05` | Warmup ratio |
 | `--max_norm` | `1.0` | Gradient clipping max norm |
-| `--backend` | `deepspeed` | Training backend (`deepspeed` / `fsdp2`) |
+| `--backend` | `fsdp2` | Training backend |
 | `--gradient_checkpointing` | `False` | Enable gradient checkpointing |
 | `--save_path` | `./ckpt/` | Model save path |
 
@@ -177,10 +180,11 @@ torchrun --nproc_per_node 8 -m kdflow.cli.train_sft \
 |---|---|---|
 | `--kd_ratio` | `0.5` | KD loss weight: `loss = (1 - kd_ratio) * CE + kd_ratio * KD` |
 | `--kd_temperature` | `1.0` | Temperature for softmax in KD |
-| `--kd_algorithm` | `vanilla_kd` | KD algorithm (`vanilla_kd` / `dskd` / `sft`) |
-| `--loss_fn` | `kl` | Divergence function (`kl` / `rkl` / `top1_ce`) |
-| `--use_triton_loss` | `False` | Use Triton kernel for KL computation |
+| `--kd_algorithm` | `vanilla_kd` | KD algorithm (`vanilla_kd` / `dskd`) |
+| `--kd_loss_fn` | `kl` | Divergence function (like `kl` / `rkl` / `jsd`) |
 | `--teacher_tp_size` | `8` | Teacher tensor parallel size |
+| `--teacher_ep_size` | `1` | Teacher expert parallel size |
+| `--teacher_pp_size` | `1` | Teacher pipeline parallel size |
 | `--teacher_dp_size` | `1` | Teacher data parallel size |
 | `--teacher_enable_sleep` | `False` | Enable teacher sleep/wakeup for GPU sharing |
 | `--teacher_forward_n_batches` | `1` | Teacher forward N batches at once |
@@ -209,14 +213,6 @@ torchrun --nproc_per_node 8 -m kdflow.cli.train_sft \
 | `--apply_chat_template` | `True` | Apply tokenizer chat template |
 | `--packing_samples` | `False` | Pack sequences for efficiency |
 | `--use_dynamic_batch` | `False` | Dynamic batching by token count |
-
-### DeepSpeed Arguments
-
-| Argument | Default | Description |
-|---|---|---|
-| `--student_zero_stage` | `1` | ZeRO optimization stage (1/2/3) |
-| `--adam_offload` | `False` | Offload Adam optimizer to CPU |
-| `--autotp_size` | `1` | DeepSpeed tensor parallel size |
 
 ### Logging Arguments
 
@@ -273,6 +269,37 @@ class MyCustomKD:
 
 Then use it with `--kd_algorithm my_custom_kd`.
 
+### Adding a Custom KD Loss
+
+Create a new file in `kdflow/loss/` and register it:
+
+```python
+import torch
+import torch.nn.functional as F 
+
+from kdflow.loss import register_loss
+
+
+@register_loss("my_custom_loss")
+@torch.compile()
+def compute_kl_div(
+    student_logits,
+    teacher_logits, 
+    temperature=1.0,
+    reduction="none",
+    **kwargs
+):
+    student_logits = student_logits / temperature
+    teacher_logits = teacher_logits / temperature
+    log_probs = torch.log_softmax(student_logits, -1, dtype=torch.float32)
+    target_probs = torch.softmax(teacher_logits, -1, dtype=torch.float32)
+    kl_div = F.kl_div(log_probs, target_probs, reduction=reduction).sum(-1)
+    
+    return kl_div
+```
+
+Then use it with `--kd_loss_fn my_custom_loss`.
+
 ---
 
 ## 🔑 Design Highlights
@@ -284,9 +311,13 @@ KDFlow enables teacher and student to **share the same GPUs** through a sleep/wa
 1. **Teacher phase**: Teacher model weights are loaded on GPU, student optimizer states are offloaded to CPU.
 2. **Student phase**: Student optimizer states are reloaded to GPU, teacher model weights are offloaded to CPU.
 
-This allows running large teacher models (e.g., 30B+ parameters) on the same hardware as the student without requiring separate GPU pools.
+This allows running large teacher models (e.g., 200B+ parameters) on the same hardware as the student without requiring separate GPU pools.
 
 ### Hidden States Transfer via Shared Memory
+
+<p align="center">
+  <img src="figures/cost.png" alt="Knowledge transfer cost" width="80%">
+</p>
 
 Instead of transferring full teacher logits (which can be enormous for large vocabularies), KDFlow:
 
@@ -296,7 +327,7 @@ Instead of transferring full teacher logits (which can be enormous for large voc
 
 This dramatically reduces memory and communication overhead.
 
-### Token-Based Load Balancing
+### Token-Based Teacher Load Balancing
 
 The `TeacherActorGroup` uses a **greedy token-based load balancing** strategy to distribute micro-batches across teacher actors, ensuring even workload distribution when sequence lengths vary.
 

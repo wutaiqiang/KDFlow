@@ -1,0 +1,200 @@
+import time
+from itertools import chain
+from typing import Optional, Tuple, Union
+
+import ray
+import torch
+import numpy as np
+from ray.util.placement_group import PlacementGroup
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+
+from kdflow.ray.train.teacher_actor import TeacherRayActor
+from kdflow.utils.logging_utils import init_logger
+
+logger = init_logger(__name__)
+
+
+NOSET_VISIBLE_DEVICES_ENV_VARS_LIST = [
+    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+    "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES",
+    "RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES",
+    "RAY_EXPERIMENTAL_NOSET_NEURON_RT_VISIBLE_CORES",
+    "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS",
+    "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
+]
+
+
+class TeacherActorGroup:
+    """
+    TeacherActorGroup: Manages multiple TeacherRayActor instances for distributed
+    teacher forward (prefilling) in knowledge distillation.
+    
+    Key design: Teacher actors are scheduled on PlacementGroup bundles using
+    RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES + base_gpu_id, matching the
+    same pattern as RolloutActorGroup for unified resource management.
+    """
+    
+    def __init__(
+        self,
+        strategy,
+        num_gpus: int,
+        num_gpus_per_node: int = 8,
+        num_gpus_per_actor: float = 0.2,
+        pg: Optional[Union[PlacementGroup, Tuple[PlacementGroup, list, list]]] = None,
+    ):
+        """
+        Initialize TeacherActorGroup.
+        
+        Args:
+            strategy: Training strategy containing configuration args
+            num_gpus: Total number of GPUs available (e.g., 8)
+            num_gpus_per_node: Number of GPUs per physical node
+            num_gpus_per_actor: Ray GPU resources per actor (fractional for co-location)
+            pg: 3-tuple (pg, reordered_bundle_indices, reordered_gpu_ids), PlacementGroup, or None
+        """
+        logger.info("[TeacherActorGroup] Starting initialization...")
+        self.teacher_engines = []
+        self.strategy = strategy
+        self.dp_size = strategy.args.kd.teacher_dp_size
+        self.tp_size = strategy.args.kd.teacher_tp_size
+        self.num_gpus_per_node = num_gpus_per_node
+        
+        # Parse PG info (same pattern as RolloutActorGroup)
+        if pg is not None and isinstance(pg, tuple):
+            self._pg, self._reordered_bundle_indices, self._reordered_gpu_ids = pg
+        elif pg is not None:
+            self._pg = pg
+            total_gpus = self.dp_size * self.tp_size
+            self._reordered_bundle_indices = list(range(total_gpus))
+            self._reordered_gpu_ids = list(range(total_gpus))
+        else:
+            self._pg = None
+            self._reordered_bundle_indices = None
+            self._reordered_gpu_ids = None
+        
+        # Validate configuration
+        required_gpus = self.dp_size * self.tp_size
+        if required_gpus > num_gpus:
+            raise ValueError(f"Teacher requires {required_gpus} GPUs (dp={self.dp_size} * tp={self.tp_size}) "
+                           f"but only {num_gpus} GPUs available")
+        
+        logger.info(f"[TeacherActorGroup] Creating {self.dp_size} actors with tp_size={self.tp_size}")
+        
+        self._create_actors(num_gpus_per_actor)
+        
+        ray.get([actor.ready.remote() for actor in self.teacher_engines])
+        
+        logger.info(f"[TeacherActorGroup] All {self.dp_size} actors ready.")
+    
+    def _create_actors(self, num_gpus_per_actor: float):
+        """Create Ray remote TeacherRayActor instances with proper GPU binding via PG."""
+        env_vars = {
+            name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST
+        }
+        
+        num_gpu_per_engine = min(self.tp_size, self.num_gpus_per_node)
+        
+        for i in range(self.dp_size):
+            # Calculate base_gpu_id from PG topology (same as RolloutActorGroup)
+            if self._reordered_gpu_ids is not None:
+                base_gpu_id = int(self._reordered_gpu_ids[i * num_gpu_per_engine])
+            else:
+                base_gpu_id = (i * num_gpu_per_engine) % self.num_gpus_per_node
+            
+            logger.info(f"[TeacherActorGroup] Launching actor {i} with base_gpu_id={base_gpu_id}...")
+            
+            options = {
+                "num_cpus": num_gpus_per_actor,
+                "num_gpus": num_gpus_per_actor,
+                "max_concurrency": 2,
+                "runtime_env": {
+                    "env_vars": env_vars,
+                },
+            }
+            
+            # Schedule on PG bundle if available
+            if self._pg is not None and self._reordered_bundle_indices is not None:
+                options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(
+                    placement_group=self._pg,
+                    placement_group_capture_child_tasks=True,
+                    placement_group_bundle_index=self._reordered_bundle_indices[i * num_gpu_per_engine],
+                )
+            
+            actor = TeacherRayActor.options(**options).remote(self.strategy, base_gpu_id)
+            
+            self.teacher_engines.append(actor)
+            logger.info(f"[TeacherActorGroup] Actor {i} created, waiting for ready...")
+    
+    def forward(self, global_batch):
+        """
+        Perform forward pass (prefilling) on all teacher actors in parallel.
+        Uses token-based load balancing to distribute batches evenly across actors.
+        """
+        all_data_ref = ray.put(global_batch)
+        
+        # === Token-based load balancing ===
+        # Calculate token count for each micro-batch (sum of non-padding tokens)
+        batch_token_counts = []
+        for mb in global_batch:
+            # attn_mask indicates non-padding positions
+            token_count = mb["tea_attn_mask"].sum().item()
+            batch_token_counts.append(token_count)
+        
+        # Assign batches to actors using greedy algorithm: 
+        # Always assign next batch to the actor with fewest tokens
+        actor_assignments = [[] for _ in range(self.dp_size)]  # batch indices for each actor
+        actor_tokens = [0] * self.dp_size  # running token count for each actor
+        
+        for batch_idx, token_count in enumerate(batch_token_counts):
+            # Find actor with minimum tokens so far
+            min_actor = min(range(self.dp_size), key=lambda x: actor_tokens[x])
+            actor_assignments[min_actor].append(batch_idx)
+            actor_tokens[min_actor] += token_count
+        
+        futures = []
+        for i, actor in enumerate(self.teacher_engines):
+            batch_indices = actor_assignments[i]
+            futures.append(actor.forward.remote(all_data_ref, batch_indices))
+        
+        # Use ray.wait to get results as they complete, measuring each actor's timing
+        pending = list(futures)
+        raw_results = [None] * len(futures)
+        future_to_idx = {f: i for i, f in enumerate(futures)}
+        
+        while pending:
+            ready, pending = ray.wait(pending, num_returns=1)
+            for ref in ready:
+                idx = future_to_idx[ref]
+                raw_results[idx] = ray.get(ref)
+        
+        # Flatten results (extract (batch_idx, batch) tuples from all actors)
+        # Each actor returns (results_with_indices, timestamp) where results_with_indices is [(batch_idx, batch), ...]
+        indexed_results = list(chain.from_iterable(r for r in raw_results))
+        
+        # Sort by original batch index to restore the original order
+        indexed_results.sort(key=lambda x: x[0])
+        results = [batch for _, batch in indexed_results]
+        
+        # # Convert numpy arrays to pinned memory tensors for faster async CPU->GPU transfer
+        # # Pin memory allows non_blocking=True in .to(device) to truly overlap with computation
+        # for batch in results:
+        #     if "teacher_hiddens" in batch and isinstance(batch["teacher_hiddens"], np.ndarray):
+        #         tensor = torch.from_numpy(batch["teacher_hiddens"])
+        #         # Use pin_memory for faster async transfer to GPU
+        #         batch["teacher_hiddens"] = tensor.pin_memory()
+            
+        #     # Also pin other large tensors that will be transferred to GPU
+        #     for key in batch:
+        #         if key in batch and isinstance(batch[key], torch.Tensor) and not batch[key].is_pinned():
+        #             batch[key] = batch[key].pin_memory()
+        
+        return results
+    
+    def sleep(self):
+        """Release GPU memory on all teacher engines."""
+        ray.get([actor.sleep.remote() for actor in self.teacher_engines])
+    
+    def wakeup(self):
+        """Resume GPU memory on all teacher engines."""
+        ray.get([actor.wakeup.remote() for actor in self.teacher_engines])

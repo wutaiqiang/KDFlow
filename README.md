@@ -333,6 +333,33 @@ The `TeacherActorGroup` uses a **greedy token-based load balancing** strategy to
 
 ---
 
+## 🙏 Acknowledgement
+
+KDFlow is built upon the shoulders of outstanding open-source projects. We sincerely thank:
+
+- [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) — We gratefully adopt its well-designed abstractions for model wrapping and distributed training strategy, which form the foundation of our training infrastructure.
+- [slime](https://github.com/THUDM/slime) — We appreciate its elegant implementation of Ray placement group initialization and the weight update mechanism for SGLang, which greatly inspired our design of on-policy distillation.
+
+---
+
+## 📖 Citation
+
+If you find KDFlow useful in your research or work, please consider citing our paper:
+
+```bibtex
+@article{zhang2026kdflow,
+      title={KDFlow: A User-Friendly and Efficient Knowledge Distillation Framework for Large Language Models}, 
+      author={Songming Zhang and Xue Zhang and Tong Zhang and Bojie Hu and Yufeng Chen and Jinan Xu},
+      year={2026},
+      eprint={2603.01875},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2603.01875}, 
+}
+```
+
+---
+
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).

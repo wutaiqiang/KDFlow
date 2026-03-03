@@ -7,10 +7,13 @@ import torch.distributed as dist
 
 from datetime import timedelta
 from typing import Optional
-from loguru import logger
 from collections import defaultdict
 
 from kdflow.algorithms.sft import SFT
+from kdflow.utils.logging_utils import init_logger
+
+
+logger = init_logger(__name__)
 
 
 class SFTTrainer:
@@ -39,6 +42,10 @@ class SFTTrainer:
         
         self.log_state = defaultdict(list)
         
+        self._init_loggers()
+    
+    def _init_loggers(self) -> None:
+        """Initialize wandb loggers."""
         self._wandb = None
         if self.args.log.use_wandb and dist.get_rank() == 0:
             import wandb
@@ -62,6 +69,20 @@ class SFTTrainer:
             wandb.define_metric("eval/global_step")
             wandb.define_metric("eval/*", step_metric="eval/global_step", step_sync=True)
     
+    def _print_training_config(self) -> None:
+        """Log training configuration before training starts."""
+        total_steps = self.num_update_steps_per_epoch * self.epochs
+        grad_accum = self.args.train.train_batch_size * self.args.model.ring_attn_size \
+            // (self.args.train.micro_train_batch_size * self.args.train.num_nodes * self.args.train.num_gpus_per_node)
+        
+        logger.info("******* Start Training *******")
+        logger.info(f"  Num Epochs:            {self.epochs}")
+        logger.info(f"  Steps per Epoch:       {self.num_update_steps_per_epoch}")
+        logger.info(f"  Total Training Steps:  {total_steps}")
+        logger.info(f"  Per-device Batch Size: {self.args.train.micro_train_batch_size}")
+        logger.info(f"  Gradient Accumulation: {grad_accum}")
+        logger.info(f"  Learning Rate:         {self.args.train.learning_rate}")
+    
     def fit(self, global_step=0, start_epoch=0):
         # get eval and save steps
         if self.args.train.eval_steps == -1:
@@ -71,7 +92,8 @@ class SFTTrainer:
         
         self.global_step = global_step
         
-        self.strategy.log("++++++++++++++ Start Training ++++++++++++++")
+        # Print training configuration
+        self._print_training_config()
         
         self.start_time = time.time()
         for epoch in range(start_epoch, self.epochs):

@@ -17,8 +17,6 @@ def train(args):
     # load student model
     student = DistillModel(strategy)
     
-    strategy.print(student)
-
     # bf16 mixed precision training in fsdp
     if args.train.bf16:
         student = student.float()   # cast student to fp32 for mixed precision training in fsdp

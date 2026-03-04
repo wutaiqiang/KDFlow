@@ -30,6 +30,9 @@ class DataArguments:
         default="messages",
         metadata={"help": "JSON dataset key."}
     )
+    output_key: str = field(
+        default=None,
+    )
     teacher_input_key: str = field(
         default=None,
         metadata={"help": "JSON dataset key for teacher prompt. If None, use the same input_key as student. "

@@ -4,16 +4,10 @@ from multiprocessing import Queue
 from multiprocessing.shared_memory import SharedMemory
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-from functools import partial
 
 import numpy as np
 import torch
-import sglang.srt.entrypoints.engine as _engine_module
-from sglang.srt.entrypoints.engine import (
-    Engine as _SglEngine,
-    _launch_subprocesses,
-    _launch_scheduler_processes,
-)
+from sglang.srt.entrypoints.engine import Engine as _SglEngine
 from sglang.srt.managers.scheduler import run_scheduler_process as _original_run_scheduler_process
 
 _DEFAULT_SHM_POOL_SIZE = 1024 * 2048 * 4096
@@ -28,25 +22,12 @@ def _patched_run_scheduler_process(*args, **kwargs):
     return _original_run_scheduler_process(*args, **kwargs)
 
 
-def _patched_launch_subprocesses(server_args, port_args=None):
-    patched = partial(
-        _launch_scheduler_processes,
-        run_scheduler_process_func=_patched_run_scheduler_process,
-    )
-    original = _engine_module._launch_scheduler_processes
-    _engine_module._launch_scheduler_processes = patched
-    try:
-        return _launch_subprocesses(server_args=server_args, port_args=port_args)
-    finally:
-        _engine_module._launch_scheduler_processes = original
-
-
 class PatchedEngine(_SglEngine):
     """
     SGLang Engine that applies monkey patch in scheduler subprocesses.
-    Motivation: SGLang Engine supports returning hidden states, but the existing implementation use .tolist() to convert hidden states fro GPU tensor to Python list, which is very inefficient. This monkey patch replaces the original .tolist() with a more efficient operation .numpy().
+    Motivation: SGLang Engine supports returning hidden states, but the existing implementation use .tolist() to convert hidden states from GPU tensor to Python list, which is very inefficient. This monkey patch replaces the original .tolist() with a more efficient operation .numpy().
     """
-    launch_subprocesses_func = staticmethod(_patched_launch_subprocesses)
+    run_scheduler_process_func = staticmethod(_patched_run_scheduler_process)
 
 
 @dataclass

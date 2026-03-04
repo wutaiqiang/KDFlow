@@ -1,16 +1,6 @@
 """
 Monkey patch for SGLang scheduler's process_batch_result_prefill method.
 This allows using numpy() instead of tolist() for hidden_states, which is much faster.
-
-Usage:
-    # Method 1: Direct import (for current process only)
-    import kdflow.backend.sglang.monkey_patch
-    monkey_patch.apply_patch()
-    
-    # Method 2: Via sitecustomize.py (for ALL processes including SGLang's internal subprocesses)
-    # Set environment variables before starting Python:
-    #   export SGLANG_PREFILL_PATCH_ENABLED=1
-    #   export PYTHONPATH=/path/to/kdflow/backend/sglang:$PYTHONPATH
 """
 
 from __future__ import annotations
@@ -47,7 +37,6 @@ def process_batch_result_prefill_patched(
     Patched version of process_batch_result_prefill.
     Key change: Use .numpy() instead of .tolist() for hidden_states (much faster).
     """
-    from sglang.srt.disaggregation.utils import DisaggregationMode
     from sglang.srt.environ import envs
     from sglang.srt.managers.io_struct import AbortReq
     from sglang.srt.managers.schedule_batch import RequestStage
@@ -95,16 +84,22 @@ def process_batch_result_prefill_patched(
                 continue
 
             if req.is_chunked <= 0:
+                if req.time_stats.prefill_finished_ts == 0.0:
+                    req.time_stats.prefill_finished_ts = time.time()
+
                 # req output_ids are set here
                 req.output_ids.append(next_token_id)
                 req.check_finished()
 
                 if req.finished():
+                    self.maybe_collect_routed_experts(req)
                     release_kv_cache(req, self.tree_cache)
                     req.time_stats.completion_time = time.perf_counter()
                 elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                     # This updates radix so others can match
                     self.tree_cache.cache_unfinished_req(req)
+
+                self.maybe_collect_customized_info(i, req, logits_output)
 
                 if batch.return_logprob:
                     assert extend_logprob_start_len_per_req is not None
@@ -131,7 +126,6 @@ def process_batch_result_prefill_patched(
                 if (
                     req.return_hidden_states
                     and logits_output.hidden_states is not None
-                    and self.attn_tp_rank == 0
                 ):
                     req.hidden_states.append(
                         logits_output.hidden_states[
@@ -200,6 +194,9 @@ def process_batch_result_prefill_patched(
                 )
 
     else:  # embedding or reward model
+        if result.copy_done is not None:
+            result.copy_done.synchronize()
+
         is_sparse = envs.SGLANG_EMBEDDINGS_SPARSE_HEAD.is_set()
 
         embeddings = result.embeddings
@@ -246,6 +243,14 @@ def process_batch_result_prefill_patched(
             )
 
     self.stream_output(batch.reqs, batch.return_logprob, skip_stream_req)
+
+    if self.current_scheduler_metrics_enabled:
+        can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)
+        self.log_prefill_stats(
+            prefill_stats=batch.prefill_stats,
+            can_run_cuda_graph=can_run_cuda_graph,
+            dp_cooperation_info=batch.dp_cooperation_info,
+        )
 
 
 def apply_patch():

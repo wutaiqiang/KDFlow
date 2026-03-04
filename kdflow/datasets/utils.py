@@ -97,3 +97,128 @@ def blending_datasets(
         )
 
     return dataset
+
+
+# ShareGPT role mapping to OpenAI roles
+SHAREGPT_ROLE_MAP = {
+    "human": "user",
+    "user": "user",
+    "gpt": "assistant",
+    "assistant": "assistant",
+    "system": "system",
+}
+
+
+def _is_sharegpt_format(data):
+    """Check if data is in ShareGPT format (list of dicts with 'from'/'value' keys)."""
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return False
+    return "from" in data[0] and "value" in data[0]
+
+
+def _is_openai_format(data):
+    """Check if data is already in OpenAI messages format (list of dicts with 'role'/'content' keys)."""
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return False
+    return "role" in data[0] and "content" in data[0]
+
+
+def _is_alpaca_format(data):
+    """Check if data is in Alpaca format (dict with 'instruction' key)."""
+    if not isinstance(data, dict):
+        return False
+    return "instruction" in data
+
+
+def _convert_sharegpt(messages):
+    """Convert ShareGPT format messages to OpenAI messages format.
+    
+    ShareGPT: [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]
+    OpenAI:   [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+    """
+    converted = []
+    for msg in messages:
+        role = SHAREGPT_ROLE_MAP.get(msg["from"], msg["from"])
+        content = msg.get("value") or ""
+        converted.append({"role": role, "content": content})
+    return converted
+
+
+def _convert_alpaca(data):
+    """Convert Alpaca format to OpenAI messages format.
+    
+    Alpaca format fields:
+        - instruction (required): the main instruction/question
+        - input (optional): additional input context
+        - output (optional): the expected response
+        - system (optional): system prompt
+        - history (optional): list of [user_msg, assistant_msg] pairs
+    
+    Returns:
+        List of OpenAI messages: [{"role": "...", "content": "..."}, ...]
+    """
+    messages = []
+
+    # System prompt
+    system_prompt = data.get("system", "")
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+
+    # History turns
+    history = data.get("history", [])
+    for turn in history:
+        if isinstance(turn, (list, tuple)) and len(turn) == 2:
+            messages.append({"role": "user", "content": turn[0]})
+            messages.append({"role": "assistant", "content": turn[1]})
+
+    # Current instruction + optional input
+    instruction = data.get("instruction", "")
+    extra_input = data.get("input", "")
+    if extra_input:
+        user_content = f"{instruction}\n{extra_input}"
+    else:
+        user_content = instruction
+    messages.append({"role": "user", "content": user_content})
+
+    # Output (response)
+    output = data.get("output", "")
+    if output:
+        messages.append({"role": "assistant", "content": output})
+
+    return messages
+
+
+def convert_to_openai_messages(data):
+    """Unified converter: auto-detect data format and convert to OpenAI messages.
+    
+    Supported input formats:
+        1. OpenAI messages (already): [{"role": "user", "content": "..."}] -> returned as-is
+        2. ShareGPT: [{"from": "human", "value": "..."}] -> converted
+        3. Alpaca: {"instruction": "...", "input": "...", "output": "...", ...} -> converted
+        4. Plain string: "..." -> wrapped as [{"role": "user", "content": "..."}]
+    
+    Returns:
+        List of dicts in OpenAI messages format: [{"role": "...", "content": "..."}, ...]
+    """
+    if data is None:
+        raise ValueError("convert_to_openai_messages received None input.")
+
+    if isinstance(data, str):
+        return [{"role": "user", "content": data}]
+
+    if isinstance(data, list):
+        if not data:
+            raise ValueError("convert_to_openai_messages received an empty list.")
+        if _is_openai_format(data):
+            return data
+        if _is_sharegpt_format(data):
+            return _convert_sharegpt(data)
+
+    if isinstance(data, dict):
+        if _is_alpaca_format(data):
+            return _convert_alpaca(data)
+
+    raise ValueError(
+        f"Unsupported data format. Expected OpenAI messages, ShareGPT, Alpaca, or plain string. "
+        f"Got: {type(data)} with keys/content: {data if isinstance(data, str) else list(data[0].keys()) if isinstance(data, list) and data else data}"
+    )

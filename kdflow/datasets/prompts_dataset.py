@@ -2,6 +2,7 @@ from typing import Callable, Optional, Dict, Any, List
 
 from torch.utils.data import Dataset
 
+from kdflow.datasets.utils import convert_to_openai_messages
 from kdflow.models.utils import TokenizerCompareResult
 
 
@@ -84,9 +85,7 @@ class PromptDataset(Dataset):
             Formatted prompt string
         """
         if self.apply_chat_template:
-            chat = data[input_key]
-            if isinstance(chat, str):
-                chat = [{"role": "user", "content": chat}]
+            chat = convert_to_openai_messages(data[input_key])
             return tokenizer.apply_chat_template(
                 chat,
                 tokenize=False,

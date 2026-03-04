@@ -3,6 +3,7 @@ from typing import Callable, Optional, Dict, List, Any
 import torch
 from torch.utils.data import Dataset
 
+from kdflow.datasets.utils import convert_to_openai_messages
 from kdflow.models.utils import TokenizerCompareResult
 from kdflow.utils.utils import zero_pad_sequences
 
@@ -67,11 +68,11 @@ class SFTDataset(Dataset):
 
     def _print_sample(self) -> None:
         """Print sample data for debugging."""
-        self.strategy.log("Student input ids:")
-        self.strategy.log(self.student_tokenizer.decode(self.processed_dataset[0]["stu_input_ids"]))
+        self.strategy.print("Student input ids:")
+        self.strategy.print(self.student_tokenizer.decode(self.processed_dataset[0]["stu_input_ids"]))
         if not self.template_identical or not self.vocab_identical:
-            self.strategy.log("Teacher input ids:")
-            self.strategy.log(self.teacher_tokenizer.decode(self.processed_dataset[0]["tea_input_ids"]))
+            self.strategy.print("Teacher input ids:")
+            self.strategy.print(self.teacher_tokenizer.decode(self.processed_dataset[0]["tea_input_ids"]))
 
     def _tokenize_and_build(
         self, 
@@ -96,10 +97,24 @@ class SFTDataset(Dataset):
             f"{prefix}_loss_mask": [False] * prompt_len + [True] * len(resp["input_ids"]),
         }
 
+    def _empty_result(self) -> Dict[str, Any]:
+        """Return an empty result dict for filtering."""
+        return {
+            "stu_prompt": None, "stu_response": None,
+            "stu_input_ids": [], "stu_attn_mask": [], "stu_loss_mask": [],
+            "tea_prompt": None, "tea_response": None,
+            "tea_input_ids": [], "tea_attn_mask": [], "tea_loss_mask": [],
+        }
+
     def process_data(self, data: Dict) -> Dict[str, Any]:
         """Process a single data sample."""
         enable_thinking = self.strategy.args.model.enable_thinking
         
+        # Skip samples with None input
+        input_data = data.get(self.input_key)
+        if input_data is None:
+            return self._empty_result()
+
         # Process student data
         stu_prompt_str, stu_resp_str = self.preprocess_data(
             data,
@@ -113,12 +128,7 @@ class SFTDataset(Dataset):
         
         # Filter by max_length
         if len(result["stu_input_ids"]) > self.max_length:
-            return {
-                "stu_prompt": None, "stu_response": None,
-                "stu_input_ids": [], "stu_attn_mask": [], "stu_loss_mask": [],
-                "tea_prompt": None, "tea_response": None,
-                "tea_input_ids": [], "tea_attn_mask": [], "tea_loss_mask": [],
-            }
+            return self._empty_result()
         
         # Process teacher data if needed
         if not self.template_identical or not self.vocab_identical:
@@ -160,18 +170,15 @@ class SFTDataset(Dataset):
         
         # Apply chat template
         if output_key:
-            prompt_msg = data[input_key]
-            resp_msg = data[output_key]
-
-            if isinstance(prompt_msg, str) and isinstance(resp_msg, str):
-                prompt_msg = [{"role": "user", "content": prompt_msg}]
-                resp_msg = [{"role": "assistant", "content": resp_msg}]
-            
+            prompt_msg = convert_to_openai_messages(data[input_key])
+            resp_msg = convert_to_openai_messages(data[output_key])
+            # Ensure resp_msg only contains assistant turns
             prompt = apply_chat_template(prompt_msg, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking)
             full_text = apply_chat_template(prompt_msg + resp_msg, tokenize=False, enable_thinking=enable_thinking)
         else:
-            prompt = apply_chat_template(data[input_key][:-1], tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking)
-            full_text = apply_chat_template(data[input_key], tokenize=False, enable_thinking=enable_thinking)
+            messages = convert_to_openai_messages(data[input_key])
+            prompt = apply_chat_template(messages[:-1], tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking)
+            full_text = apply_chat_template(messages, tokenize=False, enable_thinking=enable_thinking)
         
         response = full_text[len(prompt):].lstrip("<think>\n\n</think>\n\n").rstrip()
         return prompt, response

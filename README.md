@@ -62,82 +62,30 @@ Prompts → Rollout (SGLang) → Responses → Teacher Forward → Hidden States
 
 ## 🚀 Quick Start
 
-### Prerequisites
+### Installation
 
-- Python 3.10+
-- PyTorch 2.4+
-- [Ray](https://docs.ray.io/) 2.x
-- [SGLang](https://github.com/sgl-project/sglang)
-- [Transformers](https://github.com/huggingface/transformers)
-- [PEFT](https://github.com/huggingface/peft) (for LoRA)
+```bash
+git clone https://github.com/songmzhang/KDFlow.git
+cd KDFlow
+pip install -e ./
+```
 
 ### Off-Policy Knowledge Distillation
 
 ```bash
-python -m kdflow.cli.train_kd_off_policy \
-    --student_name_or_path <student_model_path> \
-    --teacher_name_or_path <teacher_model_path> \
-    --train_dataset_path <dataset_path> \
-    --max_len 4096 \
-    --train_batch_size 128 \
-    --micro_train_batch_size 1 \
-    --num_nodes 1 \
-    --num_gpus_per_node 8 \
-    --learning_rate 2e-5 \
-    --num_epochs 1 \
-    --kd_ratio 1.0 \
-    --kd_temperature 1.0 \
-    --kd_algorithm vanilla_kd \
-    --loss_fn kl \
-    --teacher_tp_size 8 \
-    --teacher_dp_size 1 \
-    --backend fsdp2 \
-    --save_path ./output/off_policy_kd \
-    --bf16
+bash ./examples/off_policy_kd/run_qwen3_30b_a3b_to_4b.sh
 ```
 
 ### On-Policy Knowledge Distillation
 
 ```bash
-python -m kdflow.cli.train_kd_on_policy \
-    --student_name_or_path <student_model_path> \
-    --teacher_name_or_path <teacher_model_path> \
-    --train_dataset_path <dataset_path> \
-    --num_nodes 1 \
-    --num_gpus_per_node 8 \
-    --train_batch_size 128 \
-    --micro_train_batch_size 1 \
-    --learning_rate 2e-5 \
-    --num_epochs 1 \
-    --kd_ratio 1.0 \
-    --kd_algorithm vanilla_kd \
-    --loss_fn kl \
-    --teacher_tp_size 8 \
-    --rollout_num_engines 4 \
-    --rollout_tp_size 2 \
-    --rollout_batch_size 32 \
-    --n_samples_per_prompt 1 \
-    --generate_max_len 2048 \
-    --temperature 1.0 \
-    --backend fsdp2 \
-    --save_path ./output/on_policy_kd \
-    --bf16
+bash ./examples/on_policy_kd/run_qwen3_30b_a3b_to_4b.sh
 ```
 
 ### Supervised Fine-Tuning (SFT)
 
 ```bash
-torchrun --nproc_per_node 8 -m kdflow.cli.train_sft \
-    --student_name_or_path <model_path> \
-    --train_dataset_path <dataset_path> \
-    --max_len 4096 \
-    --train_batch_size 128 \
-    --micro_train_batch_size 2 \
-    --learning_rate 1e-5 \
-    --num_epochs 1 \
-    --backend fsdp2 \
-    --save_path ./output/sft \
-    --bf16
+bash ./examples/sft/run_qwen3_4b.sh
 ```
 
 ---
